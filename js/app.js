@@ -215,14 +215,23 @@ document.querySelectorAll('.layer-btn').forEach((btn) => {
 /* ── Bootstrap ───────────────────────────────────────────────────── */
 
 (async function init() {
-  setStatus('Kaartlagen worden geladen…', 'loading');
-
   const keys = Object.keys(LAYER_CONFIG);
-  const results = await Promise.allSettled(keys.map((k) => loadLayer(k)));
-
+  const total = keys.length;
+  let doneCount = 0;
   let loaded = 0;
   let failed = 0;
   let totalFeatures = 0;
+
+  setStatus(`Lagen laden… 0 / ${total}`, 'loading');
+
+  const results = await Promise.allSettled(
+    keys.map(async (k) => {
+      const count = await loadLayer(k);
+      doneCount++;
+      setStatus(`Lagen laden… ${doneCount} / ${total}`, 'loading');
+      return count;
+    })
+  );
 
   results.forEach((r, i) => {
     if (r.status === 'fulfilled' && r.value !== null) {
