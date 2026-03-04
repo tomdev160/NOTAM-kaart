@@ -1,78 +1,240 @@
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Leaflet Map</title>
-    <link rel="stylesheet" href="css/style.css">
-    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
-    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
-    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
-</head>
-<body>
-    <div id="map" style="height: 600px;"></div>
-    <div id="status"></div>
-    <script>
-        const map = L.map('map').setView([51.505, -0.09], 13);
-        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+/**
+ * NOTAM Kaart – app.js
+ *
+ * Data source:
+ * https://services-eu1.arcgis.com/OtUwzhpKSdeXgRIB/ArcGIS/rest/services/Airspaces_data/FeatureServer
+ */
 
-        const layerIds = { prohibited: 19, ctr: 15, restricted: 18, tsa: 3 };
-        let layerGroup = L.layerGroup().addTo(map);
-        document.getElementById('status').textContent = 'Loading data...';
+'use strict';
 
-        const fetchGeoJSON = async (layerId, offset = 0, limit = 1000) => {
-            try {
-                const response = await axios.get(`https://services-eu1.arcgis.com/OtUwzhpKSdeXgRIB/ArcGIS/rest/services/Airspaces_data/FeatureServer/${layerId}/query`, {
-                    params: {
-                        f: 'geojson',
-                        where: '1=1',
-                        resultOffset: offset,
-                        resultRecordCount: limit,
-                        outFields: '*'
-                    },
-                    headers: { 'Content-Type': 'application/json' }
-                });
+const ARCGIS_BASE =
+  'https://services-eu1.arcgis.com/OtUwzhpKSdeXgRIB/ArcGIS/rest/services/Airspaces_data/FeatureServer';
 
-                return response.data;
-            } catch (error) {
-                console.error('Error fetching GeoJSON:', error);
-                document.getElementById('status').textContent = 'Error loading data.';
-                throw error;
-            }
-        };
+// Subset zoals in de UI
+const LAYER_CONFIG = {
+  prohibited: {
+    layerId: 19,
+    where: '1=1',
+    style: { color: '#dc2626', fillColor: '#ef4444', fillOpacity: 0.30, weight: 2 },
+    typeClass: 'prohibited',
+    label: 'Prohibited (P)',
+  },
+  ctr: {
+    layerId: 15,
+    where: '1=1',
+    style: { color: '#2563eb', fillColor: '#3b82f6', fillOpacity: 0.20, weight: 2 },
+    typeClass: 'ctr',
+    label: 'CTR',
+  },
+  restricted: {
+    layerId: 18,
+    where: '1=1',
+    style: { color: '#ca8a04', fillColor: '#eab308', fillOpacity: 0.25, weight: 2 },
+    typeClass: 'restricted',
+    label: 'Restricted (R)',
+  },
+  tsa: {
+    layerId: 3,
+    where: '1=1',
+    style: { color: '#9333ea', fillColor: '#a855f7', fillOpacity: 0.22, weight: 2 },
+    typeClass: 'tsa',
+    label: 'TSA',
+  },
+};
 
-        const loadLayers = async (layerId) => {
-            const metadataResponse = await axios.get(`https://services-eu1.arcgis.com/OtUwzhpKSdeXgRIB/ArcGIS/rest/services/Airspaces_data/FeatureServer/${layerId}`);
-            const maxRecordCount = metadataResponse.data.maxRecordCount;
-            let offset = 0;
-            let dataFetched = true;
+/* ── Map initialisation ─────────────────────────────────────────────── */
 
-            while (dataFetched) {
-                const geojson = await fetchGeoJSON(layerId, offset, maxRecordCount);
-                if (geojson.features.length > 0) {
-                    layerGroup.addLayer(L.geoJSON(geojson));
-                    offset += maxRecordCount;
-                } else {
-                    dataFetched = false;
-                }
-            }
-            document.getElementById('status').textContent = 'Data loaded.';
-        };
+const map = L.map('map', { center: [52.3, 5.3], zoom: 8, zoomControl: true });
 
-        // Toggle layers based on button clicks (pseudo code)
-        const toggleLayer = (layerId) => {
-            if (layerGroup) {
-                layerGroup.clearLayers();
-                loadLayers(layerId);
-            }
-        };
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19,
+  attribution:
+    '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+}).addTo(map);
 
-        // Example buttons to toggle layers
-        // document.getElementById('btn_prohibited').onclick = () => toggleLayer(layerIds.prohibited);
-        // document.getElementById('btn_ctr').onclick = () => toggleLayer(layerIds.ctr);
-        // document.getElementById('btn_restricted').onclick = () => toggleLayer(layerIds.restricted);
-        // document.getElementById('btn_tsa').onclick = () => toggleLayer(layerIds.tsa);
+/* ── State ─────────────────────────────────────────────────────────── */
 
-        // Load a default layer on start
-        loadLayers(layerIds.prohibited);
-    </script>
-</body>
-</html>
+const leafletLayers = {};
+const layerVisible = { prohibited: true, ctr: true, restricted: true, tsa: true };
+
+const statusEl = document.getElementById('status-text');
+
+function setStatus(msg, state = '') {
+  statusEl.textContent = msg;
+  statusEl.className = state;
+}
+
+async function fetchJson(url) {
+  const res = await fetch(url, { credentials: 'omit', cache: 'no-cache' });
+  if (!res.ok) throw new Error(`HTTP ${res.status} from FeatureServer`);
+  const data = await res.json();
+  if (data && data.error) throw new Error(data.error.message || 'ArcGIS error');
+  return data;
+}
+
+async function getLayerMaxRecordCount(layerId) {
+  const meta = await fetchJson(`${ARCGIS_BASE}/${layerId}?f=pjson`);
+  const n = Number(meta && meta.maxRecordCount);
+  return Number.isFinite(n) && n > 0 ? n : 1000;
+}
+
+/**
+ * Haal ALLE features op via paging.
+ */
+async function queryLayerAll(layerId, where) {
+  const pageSize = await getLayerMaxRecordCount(layerId);
+
+  let offset = 0;
+  let all = [];
+  let first = null;
+
+  // simpele guard
+  const MAX_PAGES = 2000;
+  let pages = 0;
+
+  while (true) {
+    pages++;
+    if (pages > MAX_PAGES) throw new Error('Paging aborted (too many pages).');
+
+    const params = new URLSearchParams({
+      where,
+      outFields: '*',
+      returnGeometry: 'true',
+      f: 'geojson',
+      resultRecordCount: String(pageSize),
+      resultOffset: String(offset),
+      returnExceededLimitFeatures: 'true',
+    });
+
+    const data = await fetchJson(`${ARCGIS_BASE}/${layerId}/query?${params.toString()}`);
+    if (!first) first = data;
+
+    const features = (data && data.features) ? data.features : [];
+    all = all.concat(features);
+
+    if (features.length < pageSize) break;
+    offset += pageSize;
+  }
+
+  return {
+    type: 'FeatureCollection',
+    features: all,
+    crs: first && first.crs ? first.crs : undefined,
+  };
+}
+
+/* ── Popup builder ─────────────────────────────────────────────────── */
+
+function escHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function buildPopup(props, typeKey) {
+  const cfg = LAYER_CONFIG[typeKey];
+
+  const name =
+    props.Name || props.name || props.NAME ||
+    props.Designation || props.designation ||
+    props.label || props.LABEL || '(onbekend)';
+
+  const type =
+    props.TYPE || props.type || props.Airspace_type ||
+    props.type_icao || cfg.label;
+
+  const lower = props.lower_limit !== undefined
+    ? props.lower_limit
+    : (props.Lower_limit !== undefined ? props.Lower_limit : '–');
+
+  const upper = props.upper_limit !== undefined
+    ? props.upper_limit
+    : (props.Upper_limit !== undefined ? props.Upper_limit : '–');
+
+  const activity = props.Activity || props.activity || props.Status || props.status || '–';
+
+  return `
+    <div class="popup-title">${escHtml(name)}</div>
+    <span class="popup-type ${cfg.typeClass}">${escHtml(type)}</span>
+    <div class="popup-row"><strong>Ondergrens:</strong> ${escHtml(lower)}</div>
+    <div class="popup-row"><strong>Bovengrens:</strong> ${escHtml(upper)}</div>
+    <div class="popup-row"><strong>Activiteit:</strong> ${escHtml(activity)}</div>
+  `.trim();
+}
+
+/* ── Layer loader ─────────────────────────────────────────────────── */
+
+async function loadLayer(key) {
+  const cfg = LAYER_CONFIG[key];
+
+  try {
+    const geojson = await queryLayerAll(cfg.layerId, cfg.where);
+    const count = (geojson.features || []).length;
+
+    const group = L.layerGroup();
+
+    L.geoJSON(geojson, {
+      style: () => cfg.style,
+      onEachFeature: (feature, layer) => {
+        layer.bindPopup(buildPopup(feature.properties || {}, key), { maxWidth: 280 });
+        layer.on('mouseover', function () { this.openPopup(); });
+        layer.on('mouseout', function () { this.closePopup(); });
+      },
+    }).addTo(group);
+
+    leafletLayers[key] = group;
+    if (layerVisible[key]) group.addTo(map);
+
+    return count;
+  } catch (err) {
+    console.error(`Fout bij laden laag "${key}":`, err);
+    return null;
+  }
+}
+
+/* ── Toggle wiring ─────────────────────────────────────────────────── */
+
+document.querySelectorAll('.layer-btn').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const key = btn.dataset.layer;
+    const isActive = layerVisible[key];
+
+    layerVisible[key] = !isActive;
+    btn.classList.toggle('active', !isActive);
+
+    const group = leafletLayers[key];
+    if (!group) return;
+
+    if (!isActive) group.addTo(map);
+    else map.removeLayer(group);
+  });
+});
+
+/* ── Bootstrap ───────────────────────────────────────────────────── */
+
+(async function init() {
+  setStatus('Kaartlagen worden geladen…', 'loading');
+
+  const keys = Object.keys(LAYER_CONFIG);
+  const results = await Promise.allSettled(keys.map((k) => loadLayer(k)));
+
+  let loaded = 0;
+  let failed = 0;
+  let totalFeatures = 0;
+
+  results.forEach((r, i) => {
+    if (r.status === 'fulfilled' && r.value !== null) {
+      loaded++;
+      totalFeatures += r.value;
+    } else {
+      failed++;
+      console.warn(`Laag "${keys[i]}" kon niet worden geladen.`);
+    }
+  });
+
+  if (failed === keys.length) setStatus('Fout: FeatureServer niet bereikbaar.', 'error');
+  else if (failed > 0) setStatus(`${loaded} lagen geladen (${totalFeatures} gebieden), ${failed} mislukt.`, 'error');
+  else setStatus(`${totalFeatures} gebieden geladen.`, 'ok');
+})();
