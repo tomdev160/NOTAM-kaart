@@ -1,53 +1,78 @@
-// Updated FeatureServer Layer IDs
-const layerIds = {
-    FIR: 0,
-    LowFlyingArea: 1,
-    ProhibitedArea: 19,
-    RestrictedArea: 18,
-    DangerArea: 17,
-    TSA: 3,
-    TRA: 5,
-    Parajump: 6,
-    ClimbArea: 16,
-    ATZ: 7,
-    TMZ_RTMZ: 8,
-    HPZ_HTZ: 9,
-    RMZ: 10,
-    GliderArea: 11,
-    VFRArea: 12,
-    IFRArea: 20,
-    DelegatedArea: 21,
-    ACCSectorExcludingDelegations: 23,
-    ACCSectorIncludingDelegations: 22,
-    CTA: 13,
-    TMA: 14,
-    CTR: 15
-};
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Leaflet Map</title>
+    <link rel="stylesheet" href="css/style.css">
+    <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
+    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+</head>
+<body>
+    <div id="map" style="height: 600px;"></div>
+    <div id="status"></div>
+    <script>
+        const map = L.map('map').setView([51.505, -0.09], 13);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
 
-// ArcGIS REST query modifications
-const queryLayer = (layerId, resultOffset = 0, resultRecordCount = 100) => {
-    const url = `https://example.com/FeatureServer/${layerId}/query?f=json&resultOffset=${resultOffset}&resultRecordCount=${resultRecordCount}`;
-    
-    fetch(url)
-        .then(response => response.json())
-        .then(data => {
-            if(data && data.features) {
-                // Render features using Leaflet
-                renderFeatures(data.features);
+        const layerIds = { prohibited: 19, ctr: 15, restricted: 18, tsa: 3 };
+        let layerGroup = L.layerGroup().addTo(map);
+        document.getElementById('status').textContent = 'Loading data...';
+
+        const fetchGeoJSON = async (layerId, offset = 0, limit = 1000) => {
+            try {
+                const response = await axios.get(`https://services-eu1.arcgis.com/OtUwzhpKSdeXgRIB/ArcGIS/rest/services/Airspaces_data/FeatureServer/${layerId}/query`, {
+                    params: {
+                        f: 'geojson',
+                        where: '1=1',
+                        resultOffset: offset,
+                        resultRecordCount: limit,
+                        outFields: '*'
+                    },
+                    headers: { 'Content-Type': 'application/json' }
+                });
+
+                return response.data;
+            } catch (error) {
+                console.error('Error fetching GeoJSON:', error);
+                document.getElementById('status').textContent = 'Error loading data.';
+                throw error;
             }
-        })
-        .catch(error => console.error('Error fetching data:', error));
-};
+        };
 
-// Detect maxRecordCount from the service (simplified here)
-const getMaxRecordCount = async (layerId) => {
-    const url = `https://example.com/FeatureServer/${layerId}?f=json`;
-    const response = await fetch(url);
-    const data = await response.json();
-    return data.maxRecordCount || 100; // Defaulting to 100 if not specified
-};
+        const loadLayers = async (layerId) => {
+            const metadataResponse = await axios.get(`https://services-eu1.arcgis.com/OtUwzhpKSdeXgRIB/ArcGIS/rest/services/Airspaces_data/FeatureServer/${layerId}`);
+            const maxRecordCount = metadataResponse.data.maxRecordCount;
+            let offset = 0;
+            let dataFetched = true;
 
-// Usage example:
-const layerId = layerIds.FIR;  // Example for FIR
-const maxCount = await getMaxRecordCount(layerId);
-queryLayer(layerId, 0, maxCount);
+            while (dataFetched) {
+                const geojson = await fetchGeoJSON(layerId, offset, maxRecordCount);
+                if (geojson.features.length > 0) {
+                    layerGroup.addLayer(L.geoJSON(geojson));
+                    offset += maxRecordCount;
+                } else {
+                    dataFetched = false;
+                }
+            }
+            document.getElementById('status').textContent = 'Data loaded.';
+        };
+
+        // Toggle layers based on button clicks (pseudo code)
+        const toggleLayer = (layerId) => {
+            if (layerGroup) {
+                layerGroup.clearLayers();
+                loadLayers(layerId);
+            }
+        };
+
+        // Example buttons to toggle layers
+        // document.getElementById('btn_prohibited').onclick = () => toggleLayer(layerIds.prohibited);
+        // document.getElementById('btn_ctr').onclick = () => toggleLayer(layerIds.ctr);
+        // document.getElementById('btn_restricted').onclick = () => toggleLayer(layerIds.restricted);
+        // document.getElementById('btn_tsa').onclick = () => toggleLayer(layerIds.tsa);
+
+        // Load a default layer on start
+        loadLayers(layerIds.prohibited);
+    </script>
+</body>
+</html>
